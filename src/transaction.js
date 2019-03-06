@@ -7,6 +7,8 @@ var opcodes = require('bitcoin-ops')
 var typeforce = require('typeforce')
 var types = require('./types')
 var varuint = require('varuint-bitcoin')
+var networks = require('./networks')
+var coins = require('./coins')
 
 function varSliceSize (someScript) {
   var length = someScript.length
@@ -22,18 +24,20 @@ function vectorSize (someVector) {
   }, 0)
 }
 
-function Transaction () {
+function Transaction (network = networks.zcash) {
   this.version = 3
   this.locktime = 0
-  this.timestamp = 0
+  this.timestamp = 0 // capricoin specific
+  this.network = network
   this.ins = []
   this.outs = []
-  this.joinsplits = []
-  this.versionGroupId = '0x03c48270'
-  this.expiry = 0
-  this.zcash = true
-  this.spendDescs = [];
-  this.outputDescs = [];
+  this.joinsplits = [] // zcash specific
+  this.versionGroupId = '0x03c48270' // zcash specific
+  this.expiry = 0 // zcash specific
+  this.spendDescs = []; // zcash specific
+  this.outputDescs = []; // zcash specific
+  this.dashType = 0 // dash specific
+  this.dashPayload = 0 // dash specific
 }
 
 Transaction.DEFAULT_SEQUENCE = 0xffffffff
@@ -61,6 +65,14 @@ Transaction.ZCASH_NOTECIPHERTEXT_SIZE = 1 + 8 + 32 + 32 + 512 + 16
 Transaction.ZCASH_G1_PREFIX_MASK = 0x02
 Transaction.ZCASH_G2_PREFIX_MASK = 0x0a
 
+Transaction.DASH_NORMAL = 0
+Transaction.DASH_PROVIDER_REGISTER = 1
+Transaction.DASH_PROVIDER_UPDATE_SERVICE = 2
+Transaction.DASH_PROVIDER_UPDATE_REGISTRAR = 3
+Transaction.DASH_PROVIDER_UPDATE_REVOKE = 4
+Transaction.DASH_COINBASE = 5
+Transaction.DASH_QUORUM_COMMITMENT = 6
+
 Transaction.PREVOUTS_HASH_PERSON = new Buffer('ZcashPrevoutHash')
 Transaction.SEQUENCE_HASH_PERSON = new Buffer('ZcashSequencHash')
 Transaction.OUTPUTS_HASH_PERSON = new Buffer('ZcashOutputsHash')
@@ -83,7 +95,7 @@ var ZC_SAPLING_OUTPLAINTEXT_SIZE = ZC_JUBJUB_POINT_SIZE + ZC_JUBJUB_SCALAR_SIZE;
 var ZC_SAPLING_ENCCIPHERTEXT_SIZE = ZC_SAPLING_ENCPLAINTEXT_SIZE + NOTEENCRYPTION_AUTH_BYTES;
 var ZC_SAPLING_OUTCIPHERTEXT_SIZE = ZC_SAPLING_OUTPLAINTEXT_SIZE + NOTEENCRYPTION_AUTH_BYTES;
 
-Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
+Transaction.fromBuffer = function (buffer, network = networks.bitcoin, __noStrict) {
   var offset = 0
   function readSlice (n) {
     offset += n
@@ -174,7 +186,7 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
 
   var tx = new Transaction()
 
-  if (zcash) {
+  if (coins.isZcash(network)) {
     var header = readUInt32()
     tx.version = header & 0x7fffffff
     var overwintered = header >>> 31
@@ -184,6 +196,13 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
       }
       tx.versionGroupId = readUInt32()
     }
+  } else if(coins.isDash(network)){
+    tx.version = readInt32()
+    tx.dashType = tx.version >> 16
+    tx.version = tx.version & 0xffff
+    if (tx.version === 3 && (tx.dashType < Transaction.DASH_NORMAL || tx.dashType > Transaction.DASH_QUORUM_COMMITMENT)) {
+      throw new Error('Unsupported Dash transaction type')
+    }
   } else {
     tx.version = readInt32()
   }
@@ -192,7 +211,7 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
   var flag = buffer.readUInt8(offset + 1)
 
   var hasWitnesses = false
-  if (!zcash) {
+  if (!coins.isZcash(network)) {
     if (marker === Transaction.ADVANCED_TRANSACTION_MARKER &&
         flag === Transaction.ADVANCED_TRANSACTION_FLAG) {
       offset += 2
@@ -200,7 +219,7 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
     }
   }
 
-  if (hasTimestamp) {
+  if (coins.isCapricoin(network)) {
     tx.timestamp = readUInt32()
   }
 
@@ -234,92 +253,97 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
 
   tx.locktime = readUInt32()
 
-  if (tx.version >= 3 && zcash) {
-    tx.expiry = readUInt32()
+  if (coins.isZcash(network)) {
+    if (tx.version >= 3) {
+      tx.expiry = readUInt32()
+    }
+
+    if (tx.version >= 4) {
+      tx.valueBalance = readUInt64();
+      var sizeSpendDescs = readVarInt();
+      for (var i = 0; i < sizeSpendDescs; i++) {
+        var spend = readSpentDesc();
+        tx.spendDescs.push(spend);
+      }
+
+      var sizeOutputDescs = readVarInt();
+      for (var i = 0; i < sizeOutputDescs; i++) {
+        var output = readOutputDesc();
+        tx.outputDescs.push(output);
+      }
+    }
+
+    if (tx.version >= 2) {
+      var jsLen = readVarInt()
+      for (i = 0; i < jsLen; ++i) {
+        var vpubOld = readUInt64()
+        var vpubNew = readUInt64()
+        var anchor = readSlice(32)
+        var nullifiers = []
+        for (var j = 0; j < Transaction.ZCASH_NUM_JS_INPUTS; j++) {
+          nullifiers.push(readSlice(32))
+        }
+        var commitments = []
+        for (j = 0; j < Transaction.ZCASH_NUM_JS_OUTPUTS; j++) {
+          commitments.push(readSlice(32))
+        }
+        var ephemeralKey = readSlice(32)
+        var randomSeed = readSlice(32)
+        var macs = []
+        for (j = 0; j < Transaction.ZCASH_NUM_JS_INPUTS; j++) {
+          macs.push(readSlice(32))
+        }
+        var zproof = {};
+        if (tx.version <= 3) {
+          zproof = {
+            gA: readCompressedG1(),
+            gAPrime: readCompressedG1(),
+            gB: readCompressedG2(),
+            gBPrime: readCompressedG1(),
+            gC: readCompressedG1(),
+            gCPrime: readCompressedG1(),
+            gK: readCompressedG1(),
+            gH: readCompressedG1()
+          }
+        } else {
+          zproof = {
+            sA: readSlice(48),
+            sB: readSlice(96),
+            sC: readSlice(48)
+          }
+        }
+        var ciphertexts = []
+        for (j = 0; j < Transaction.ZCASH_NUM_JS_OUTPUTS; j++) {
+          ciphertexts.push(readSlice(Transaction.ZCASH_NOTECIPHERTEXT_SIZE))
+        }
+  
+        tx.joinsplits.push({
+          vpubOld: vpubOld,
+          vpubNew: vpubNew,
+          anchor: anchor,
+          nullifiers: nullifiers,
+          commitments: commitments,
+          ephemeralKey: ephemeralKey,
+          randomSeed: randomSeed,
+          macs: macs,
+          zproof: zproof,
+          ciphertexts: ciphertexts
+        })
+      }
+      if (jsLen > 0) {
+        tx.joinsplitPubkey = readSlice(32)
+        tx.joinsplitSig = readSlice(64)
+      }
+      if (tx.version >= 4 && ((tx.spendDescs.length + tx.outputDescs.length) > 0)) {
+        tx.bindingSig = readSlice(64);
+      }
+    }
   }
 
-  if (tx.version >= 4 && zcash) {
-    tx.valueBalance = readUInt64();
-    var sizeSpendDescs = readVarInt();
-    for (var i = 0; i < sizeSpendDescs; i++) {
-      var spend = readSpentDesc();
-      tx.spendDescs.push(spend);
-    }
-
-    var sizeOutputDescs = readVarInt();
-    for (var i = 0; i < sizeOutputDescs; i++) {
-      var output = readOutputDesc();
-      tx.outputDescs.push(output);
-    }
-  }	
-
-  if (tx.version >= 2 && zcash) {
-    var jsLen = readVarInt()
-    for (i = 0; i < jsLen; ++i) {
-      var vpubOld = readUInt64()
-      var vpubNew = readUInt64()
-      var anchor = readSlice(32)
-      var nullifiers = []
-      for (var j = 0; j < Transaction.ZCASH_NUM_JS_INPUTS; j++) {
-        nullifiers.push(readSlice(32))
-      }
-      var commitments = []
-      for (j = 0; j < Transaction.ZCASH_NUM_JS_OUTPUTS; j++) {
-        commitments.push(readSlice(32))
-      }
-      var ephemeralKey = readSlice(32)
-      var randomSeed = readSlice(32)
-      var macs = []
-      for (j = 0; j < Transaction.ZCASH_NUM_JS_INPUTS; j++) {
-        macs.push(readSlice(32))
-      }
-      var zproof = {};
-      if (tx.version <= 3) {
-        zproof = {
-          gA: readCompressedG1(),
-          gAPrime: readCompressedG1(),
-          gB: readCompressedG2(),
-          gBPrime: readCompressedG1(),
-          gC: readCompressedG1(),
-          gCPrime: readCompressedG1(),
-          gK: readCompressedG1(),
-          gH: readCompressedG1()
-        }
-      } else {
-        zproof = {
-          sA: readSlice(48),
-          sB: readSlice(96),
-          sC: readSlice(48)
-        }
-      }
-      var ciphertexts = []
-      for (j = 0; j < Transaction.ZCASH_NUM_JS_OUTPUTS; j++) {
-        ciphertexts.push(readSlice(Transaction.ZCASH_NOTECIPHERTEXT_SIZE))
-      }
-
-      tx.joinsplits.push({
-        vpubOld: vpubOld,
-        vpubNew: vpubNew,
-        anchor: anchor,
-        nullifiers: nullifiers,
-        commitments: commitments,
-        ephemeralKey: ephemeralKey,
-        randomSeed: randomSeed,
-        macs: macs,
-        zproof: zproof,
-        ciphertexts: ciphertexts
-      })
-    }
-    if (jsLen > 0) {
-      tx.joinsplitPubkey = readSlice(32)
-      tx.joinsplitSig = readSlice(64)
-    }
-    if (tx.version >= 4 && ((tx.spendDescs.length + tx.outputDescs.length) > 0)) {
-      tx.bindingSig = readSlice(64);
-    }
+  tx.network = network
+  if (tx.isDashSpecialTransaction()) {
+    tx.dashPayload = readVarSlice()
   }
-
-  tx.zcash = !!zcash
 
   if (__noStrict) return tx
   if (offset !== buffer.length) throw new Error('Transaction has unexpected data')
@@ -327,8 +351,8 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
   return tx
 }
 
-Transaction.fromHex = function (hex, zcash, hasTimestamp) {
-  return Transaction.fromBuffer(new Buffer(hex, 'hex'), zcash, hasTimestamp)
+Transaction.fromHex = function (hex, network) {
+  return Transaction.fromBuffer(new Buffer(hex, 'hex'), network)
 }
 
 Transaction.isCoinbaseHash = function (buffer) {
@@ -461,8 +485,12 @@ Transaction.prototype.zcashTransactionByteLength = function() {
   return byteLength
 }
 
+Transaction.prototype.isDashSpecialTransaction = function () {
+  return coins.isDash(this.network) && this.version === 3 && this.dashType !== Transaction.DASH_NORMAL
+}
+
 Transaction.prototype.__byteLength = function (__allowWitness) {
-  if (this.zcash) {
+  if (coins.isZcash(this.network)) {
     return this.zcashTransactionByteLength();
   }
 
@@ -475,6 +503,7 @@ Transaction.prototype.__byteLength = function (__allowWitness) {
     varuint.encodingLength(this.outs.length) +
     this.ins.reduce(function (sum, input) { return sum + 40 + varSliceSize(input.script) }, 0) +
     this.outs.reduce(function (sum, output) { return sum + 8 + varSliceSize(output.script) }, 0) +
+    (this.isDashSpecialTransaction() ? varSliceSize(this.dashPayload) : 0) +
     (hasWitnesses ? this.ins.reduce(function (sum, input) { return sum + vectorSize(input.witness) }, 0) : 0)
   )
 }
@@ -484,8 +513,10 @@ Transaction.prototype.clone = function () {
   var newTx = new Transaction()
   newTx.version = this.version
   newTx.locktime = this.locktime
-  newTx.zcash = this.zcash
-  if (newTx.zcash) {
+  newTx.network = this.network
+  newTx.dashType = this.dashType
+  newTx.dashPayload = this.dashPayload
+  if (coins.isZcash(newTx.network)) {
     newTx.versionGroupId = this.versionGroupId
     newTx.expiry = this.expiry
   }
@@ -789,6 +820,7 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
   function writeSlice (slice) { offset += slice.copy(buffer, offset) }
   function writeUInt8 (i) { offset = buffer.writeUInt8(i, offset) }
   function writeUInt32 (i) { offset = buffer.writeUInt32LE(i, offset) }
+  function writeInt16 (i) { offset = buffer.writeInt16LE(i, offset) }
   function writeInt32 (i) { offset = buffer.writeInt32LE(i, offset) }
   function writeUInt64 (i) { offset = bufferutils.writeUInt64LE(buffer, i, offset) }
   function writeVarInt (i) {
@@ -827,9 +859,12 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
     writeSlice(i.proof);
   }
 
-  if (this.version >= 3 && this.zcash) {
+  if (coins.isZcash(this.network) && this.version >= 3) {
     writeInt32(this.version | (1 << 31))
     writeUInt32(this.versionGroupId)
+  } else if(this.isDashSpecialTransaction()) {
+    writeInt16(this.version)
+    writeInt16(this.dashType)
   } else {
     writeInt32(this.version)
   }
@@ -873,65 +908,71 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
 
   writeUInt32(this.locktime)
 
-  if (this.version >= 3 && this.zcash) {
-    writeUInt32(this.expiry)
-  }
-
-  if (this.version >= 4 && this.zcash) {
-    writeUInt64(this.valueBalance);
-    writeVarInt(this.spendDescs.length);
-    for (var i = 0; i < this.spendDescs.length; i++) {
-      writeSpentDesc(this.spendDescs[i]);
+  if (coins.isZcash(this.network)) {
+    if (this.version >= 3) {
+      writeUInt32(this.expiry)
     }
-    writeVarInt(this.outputDescs.length);
-    for (var i = 0; i < this.outputDescs.length; i++) {
-      writeOutputDesc(this.outputDescs[i]);
-    }
-  }
 
-  if (this.version >= 2 && this.zcash) {
-    writeVarInt(this.joinsplits.length)
-    var version = this.version;
-    this.joinsplits.forEach(function (joinsplit) {
-      writeUInt64(joinsplit.vpubOld)
-      writeUInt64(joinsplit.vpubNew)
-      writeSlice(joinsplit.anchor)
-      joinsplit.nullifiers.forEach(function (nullifier) {
-        writeSlice(nullifier)
-      })
-      joinsplit.commitments.forEach(function (nullifier) {
-        writeSlice(nullifier)
-      })
-      writeSlice(joinsplit.ephemeralKey)
-      writeSlice(joinsplit.randomSeed)
-      joinsplit.macs.forEach(function (nullifier) {
-        writeSlice(nullifier)
-      })
-      if (version <= 3) {
-        writeCompressedG1(joinsplit.zproof.gA)
-        writeCompressedG1(joinsplit.zproof.gAPrime)
-        writeCompressedG2(joinsplit.zproof.gB)
-        writeCompressedG1(joinsplit.zproof.gBPrime)
-        writeCompressedG1(joinsplit.zproof.gC)
-        writeCompressedG1(joinsplit.zproof.gCPrime)
-        writeCompressedG1(joinsplit.zproof.gK)
-        writeCompressedG1(joinsplit.zproof.gH)
-      } else {
-        writeSlice(joinsplit.zproof.sA)
-        writeSlice(joinsplit.zproof.sB)
-        writeSlice(joinsplit.zproof.sC)
+    if (this.version >= 4) {
+      writeUInt64(this.valueBalance);
+      writeVarInt(this.spendDescs.length);
+      for (var i = 0; i < this.spendDescs.length; i++) {
+        writeSpentDesc(this.spendDescs[i]);
       }
-      joinsplit.ciphertexts.forEach(function (ciphertext) {
-        writeSlice(ciphertext)
+      writeVarInt(this.outputDescs.length);
+      for (var i = 0; i < this.outputDescs.length; i++) {
+        writeOutputDesc(this.outputDescs[i]);
+      }
+    }
+
+    if (this.version >= 2) {
+      writeVarInt(this.joinsplits.length)
+      var version = this.version;
+      this.joinsplits.forEach(function (joinsplit) {
+        writeUInt64(joinsplit.vpubOld)
+        writeUInt64(joinsplit.vpubNew)
+        writeSlice(joinsplit.anchor)
+        joinsplit.nullifiers.forEach(function (nullifier) {
+          writeSlice(nullifier)
+        })
+        joinsplit.commitments.forEach(function (nullifier) {
+          writeSlice(nullifier)
+        })
+        writeSlice(joinsplit.ephemeralKey)
+        writeSlice(joinsplit.randomSeed)
+        joinsplit.macs.forEach(function (nullifier) {
+          writeSlice(nullifier)
+        })
+        if (version <= 3) {
+          writeCompressedG1(joinsplit.zproof.gA)
+          writeCompressedG1(joinsplit.zproof.gAPrime)
+          writeCompressedG2(joinsplit.zproof.gB)
+          writeCompressedG1(joinsplit.zproof.gBPrime)
+          writeCompressedG1(joinsplit.zproof.gC)
+          writeCompressedG1(joinsplit.zproof.gCPrime)
+          writeCompressedG1(joinsplit.zproof.gK)
+          writeCompressedG1(joinsplit.zproof.gH)
+        } else {
+          writeSlice(joinsplit.zproof.sA)
+          writeSlice(joinsplit.zproof.sB)
+          writeSlice(joinsplit.zproof.sC)
+        }
+        joinsplit.ciphertexts.forEach(function (ciphertext) {
+          writeSlice(ciphertext)
+        })
       })
-    })
-    if (this.joinsplits.length > 0) {
-      writeSlice(this.joinsplitPubkey)
-      writeSlice(this.joinsplitSig)
+      if (this.joinsplits.length > 0) {
+        writeSlice(this.joinsplitPubkey)
+        writeSlice(this.joinsplitSig)
+      }
+      if (this.version >= 4 && ((this.spendDescs.length + this.outputDescs.length) > 0)) {
+        writeSlice(this.bindingSig);
+      }
     }
-    if (this.version >= 4 && ((this.spendDescs.length + this.outputDescs.length) > 0)) {
-      writeSlice(this.bindingSig);
-    }
+  }
+
+  if (this.isDashSpecialTransaction()) {
+    writeVarSlice(this.dashPayload)
   }
 
   // avoid slicing unless necessary
