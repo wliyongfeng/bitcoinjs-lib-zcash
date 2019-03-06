@@ -24,11 +24,11 @@ function vectorSize (someVector) {
   }, 0)
 }
 
-function Transaction (network = networks.zcash) {
+function Transaction (network) {
   this.version = 3
   this.locktime = 0
   this.timestamp = 0 // capricoin specific
-  this.network = network
+  this.network = network || networks.zcash
   this.ins = []
   this.outs = []
   this.joinsplits = [] // zcash specific
@@ -95,8 +95,9 @@ var ZC_SAPLING_OUTPLAINTEXT_SIZE = ZC_JUBJUB_POINT_SIZE + ZC_JUBJUB_SCALAR_SIZE;
 var ZC_SAPLING_ENCCIPHERTEXT_SIZE = ZC_SAPLING_ENCPLAINTEXT_SIZE + NOTEENCRYPTION_AUTH_BYTES;
 var ZC_SAPLING_OUTCIPHERTEXT_SIZE = ZC_SAPLING_OUTPLAINTEXT_SIZE + NOTEENCRYPTION_AUTH_BYTES;
 
-Transaction.fromBuffer = function (buffer, network = networks.bitcoin, __noStrict) {
+Transaction.fromBuffer = function (buffer, $network, __noStrict) {
   var offset = 0
+  var network = $network || networks.bitcoin
   function readSlice (n) {
     offset += n
     return buffer.slice(offset - n, offset)
