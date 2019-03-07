@@ -99,9 +99,8 @@ var ZC_SAPLING_OUTPLAINTEXT_SIZE = ZC_JUBJUB_POINT_SIZE + ZC_JUBJUB_SCALAR_SIZE;
 var ZC_SAPLING_ENCCIPHERTEXT_SIZE = ZC_SAPLING_ENCPLAINTEXT_SIZE + NOTEENCRYPTION_AUTH_BYTES;
 var ZC_SAPLING_OUTCIPHERTEXT_SIZE = ZC_SAPLING_OUTPLAINTEXT_SIZE + NOTEENCRYPTION_AUTH_BYTES;
 
-Transaction.fromBuffer = function (buffer, $network, __noStrict) {
+Transaction.fromBuffer = function (buffer, network, __noStrict) {
   var offset = 0
-  var network = $network || networks.bitcoin
   function readSlice (n) {
     offset += n
     return buffer.slice(offset - n, offset)
@@ -190,10 +189,10 @@ Transaction.fromBuffer = function (buffer, $network, __noStrict) {
   }
 
   var tx = new Transaction()
-  tx.network = network
+  tx.network = network || networks.bitcoin
   tx.version = readInt32()
 
-  if (coins.isZcash(network)) {
+  if (coins.isZcash(tx.network)) {
     var overwintered = tx.version >>> 31
     tx.version = tx.version & 0x7fffffff
     if (tx.version >= 3) {
@@ -202,7 +201,7 @@ Transaction.fromBuffer = function (buffer, $network, __noStrict) {
       }
       tx.versionGroupId = readUInt32()
     }
-  } else if(coins.isDash(network)){
+  } else if(coins.isDash(tx.network)){
     tx.version = readInt32()
     tx.dashType = tx.version >> 16
     tx.version = tx.version & 0xffff
@@ -215,7 +214,7 @@ Transaction.fromBuffer = function (buffer, $network, __noStrict) {
   var flag = buffer.readUInt8(offset + 1)
 
   var hasWitnesses = false
-  if (!coins.isZcash(network)) {
+  if (!coins.isZcash(tx.network)) {
     if (marker === Transaction.ADVANCED_TRANSACTION_MARKER &&
         flag === Transaction.ADVANCED_TRANSACTION_FLAG) {
       offset += 2
@@ -223,7 +222,7 @@ Transaction.fromBuffer = function (buffer, $network, __noStrict) {
     }
   }
 
-  if (coins.isCapricoin(network)) {
+  if (coins.isCapricoin(tx.network)) {
     tx.timestamp = readUInt32()
   }
 
