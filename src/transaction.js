@@ -462,6 +462,7 @@ Transaction.prototype.outputDescsByteLength = function () {
 }
 
 Transaction.prototype.zcashTransactionByteLength = function() {
+  var supportJoinsplits = this.version >= 2;
   var isOverwinterCompatible = this.version >= 3
   var isSaplingCompatible = this.version >= 4
   var byteLength = 0
@@ -482,7 +483,9 @@ Transaction.prototype.zcashTransactionByteLength = function() {
     byteLength += this.spendDescsByteLength()
     byteLength += this.outputDescsByteLength()
   }
-  byteLength += this.joinsplitByteLength()
+  if (supportJoinsplits) {
+    byteLength += this.joinsplitByteLength()
+  }
   if (isSaplingCompatible &&
     this.spendDescs.length + this.outputDescs.length > 0) {
     byteLength += 64  // bindingSig
