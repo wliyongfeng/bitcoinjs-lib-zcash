@@ -257,92 +257,91 @@ Transaction.fromBuffer = function (buffer, $network, __noStrict) {
 
   tx.locktime = readUInt32()
 
-  if (coins.isZcash(network)) {
-    if (tx.isOverwinterCompatible()) {
-      tx.expiry = readUInt32()
+  if (tx.isOverwinterCompatible()) {
+    tx.expiry = readUInt32()
+  }
+
+  if (tx.isSaplingCompatible()) {
+    tx.valueBalance = readUInt64();
+    var sizeSpendDescs = readVarInt();
+    for (var i = 0; i < sizeSpendDescs; i++) {
+      var spend = readSpentDesc();
+      tx.spendDescs.push(spend);
     }
 
-    if (tx.isSaplingCompatible()) {
-      tx.valueBalance = readUInt64();
-      var sizeSpendDescs = readVarInt();
-      for (var i = 0; i < sizeSpendDescs; i++) {
-        var spend = readSpentDesc();
-        tx.spendDescs.push(spend);
-      }
-
-      var sizeOutputDescs = readVarInt();
-      for (var i = 0; i < sizeOutputDescs; i++) {
-        var output = readOutputDesc();
-        tx.outputDescs.push(output);
-      }
-    }
-
-    if (tx.supportsJoinSplits()) {
-      var jsLen = readVarInt()
-      for (i = 0; i < jsLen; ++i) {
-        var vpubOld = readUInt64()
-        var vpubNew = readUInt64()
-        var anchor = readSlice(32)
-        var nullifiers = []
-        for (var j = 0; j < Transaction.ZCASH_NUM_JS_INPUTS; j++) {
-          nullifiers.push(readSlice(32))
-        }
-        var commitments = []
-        for (j = 0; j < Transaction.ZCASH_NUM_JS_OUTPUTS; j++) {
-          commitments.push(readSlice(32))
-        }
-        var ephemeralKey = readSlice(32)
-        var randomSeed = readSlice(32)
-        var macs = []
-        for (j = 0; j < Transaction.ZCASH_NUM_JS_INPUTS; j++) {
-          macs.push(readSlice(32))
-        }
-        var zproof = {};
-        if (tx.version <= 3) {
-          zproof = {
-            gA: readCompressedG1(),
-            gAPrime: readCompressedG1(),
-            gB: readCompressedG2(),
-            gBPrime: readCompressedG1(),
-            gC: readCompressedG1(),
-            gCPrime: readCompressedG1(),
-            gK: readCompressedG1(),
-            gH: readCompressedG1()
-          }
-        } else {
-          zproof = {
-            sA: readSlice(48),
-            sB: readSlice(96),
-            sC: readSlice(48)
-          }
-        }
-        var ciphertexts = []
-        for (j = 0; j < Transaction.ZCASH_NUM_JS_OUTPUTS; j++) {
-          ciphertexts.push(readSlice(Transaction.ZCASH_NOTECIPHERTEXT_SIZE))
-        }
-  
-        tx.joinsplits.push({
-          vpubOld: vpubOld,
-          vpubNew: vpubNew,
-          anchor: anchor,
-          nullifiers: nullifiers,
-          commitments: commitments,
-          ephemeralKey: ephemeralKey,
-          randomSeed: randomSeed,
-          macs: macs,
-          zproof: zproof,
-          ciphertexts: ciphertexts
-        })
-      }
-      if (jsLen > 0) {
-        tx.joinsplitPubkey = readSlice(32)
-        tx.joinsplitSig = readSlice(64)
-      }
-      if (tx.isSaplingCompatible() && ((tx.spendDescs.length + tx.outputDescs.length) > 0)) {
-        tx.bindingSig = readSlice(64);
-      }
+    var sizeOutputDescs = readVarInt();
+    for (var i = 0; i < sizeOutputDescs; i++) {
+      var output = readOutputDesc();
+      tx.outputDescs.push(output);
     }
   }
+
+  if (tx.supportsJoinSplits()) {
+    var jsLen = readVarInt()
+    for (i = 0; i < jsLen; ++i) {
+      var vpubOld = readUInt64()
+      var vpubNew = readUInt64()
+      var anchor = readSlice(32)
+      var nullifiers = []
+      for (var j = 0; j < Transaction.ZCASH_NUM_JS_INPUTS; j++) {
+        nullifiers.push(readSlice(32))
+      }
+      var commitments = []
+      for (j = 0; j < Transaction.ZCASH_NUM_JS_OUTPUTS; j++) {
+        commitments.push(readSlice(32))
+      }
+      var ephemeralKey = readSlice(32)
+      var randomSeed = readSlice(32)
+      var macs = []
+      for (j = 0; j < Transaction.ZCASH_NUM_JS_INPUTS; j++) {
+        macs.push(readSlice(32))
+      }
+      var zproof = {};
+      if (tx.version <= 3) {
+        zproof = {
+          gA: readCompressedG1(),
+          gAPrime: readCompressedG1(),
+          gB: readCompressedG2(),
+          gBPrime: readCompressedG1(),
+          gC: readCompressedG1(),
+          gCPrime: readCompressedG1(),
+          gK: readCompressedG1(),
+          gH: readCompressedG1()
+        }
+      } else {
+        zproof = {
+          sA: readSlice(48),
+          sB: readSlice(96),
+          sC: readSlice(48)
+        }
+      }
+      var ciphertexts = []
+      for (j = 0; j < Transaction.ZCASH_NUM_JS_OUTPUTS; j++) {
+        ciphertexts.push(readSlice(Transaction.ZCASH_NOTECIPHERTEXT_SIZE))
+      }
+
+      tx.joinsplits.push({
+        vpubOld: vpubOld,
+        vpubNew: vpubNew,
+        anchor: anchor,
+        nullifiers: nullifiers,
+        commitments: commitments,
+        ephemeralKey: ephemeralKey,
+        randomSeed: randomSeed,
+        macs: macs,
+        zproof: zproof,
+        ciphertexts: ciphertexts
+      })
+    }
+    if (jsLen > 0) {
+      tx.joinsplitPubkey = readSlice(32)
+      tx.joinsplitSig = readSlice(64)
+    }
+    if (tx.isSaplingCompatible() && ((tx.spendDescs.length + tx.outputDescs.length) > 0)) {
+      tx.bindingSig = readSlice(64);
+    }
+  }
+  
 
   if (tx.isDashSpecialTransaction()) {
     tx.dashPayload = readVarSlice()
@@ -918,8 +917,7 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
     writeUInt32(this.expiry)
   }
 
-  var isSaplingCompatible = this.isSaplingCompatible();
-  if (isSaplingCompatible) {
+  if (this.isSaplingCompatible()) {
     writeUInt64(this.valueBalance);
     writeVarInt(this.spendDescs.length);
     for (var i = 0; i < this.spendDescs.length; i++) {
@@ -933,6 +931,7 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
 
   if (this.supportsJoinSplits()) {
     writeVarInt(this.joinsplits.length)
+    var version = this.version;
     this.joinsplits.forEach(function (joinsplit) {
       writeUInt64(joinsplit.vpubOld)
       writeUInt64(joinsplit.vpubNew)
@@ -948,7 +947,7 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
       joinsplit.macs.forEach(function (nullifier) {
         writeSlice(nullifier)
       })
-      if (isSaplingCompatible) {
+      if (version <= 3) {
         writeCompressedG1(joinsplit.zproof.gA)
         writeCompressedG1(joinsplit.zproof.gAPrime)
         writeCompressedG2(joinsplit.zproof.gB)
@@ -970,7 +969,7 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
       writeSlice(this.joinsplitPubkey)
       writeSlice(this.joinsplitSig)
     }
-    if (isSaplingCompatible && ((this.spendDescs.length + this.outputDescs.length) > 0)) {
+    if (this.isSaplingCompatible() && ((this.spendDescs.length + this.outputDescs.length) > 0)) {
       writeSlice(this.bindingSig);
     }
   }
