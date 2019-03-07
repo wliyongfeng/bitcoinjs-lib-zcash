@@ -38,6 +38,7 @@ function Transaction (network) {
   this.outputDescs = []; // zcash specific
   this.dashType = 0 // dash specific
   this.dashPayload = 0 // dash specific
+  this.noStrict = false;
 }
 
 Transaction.DEFAULT_SEQUENCE = 0xffffffff
@@ -346,7 +347,10 @@ Transaction.fromBuffer = function (buffer, $network, __noStrict) {
     tx.dashPayload = readVarSlice()
   }
 
-  if (__noStrict) return tx
+  if (__noStrict) {
+    tx.noStrict = true;
+    return tx
+  }
   if (offset !== buffer.length) throw new Error('Transaction has unexpected data')
 
   return tx
@@ -517,6 +521,7 @@ Transaction.prototype.clone = function () {
   newTx.network = this.network
   newTx.dashType = this.dashType
   newTx.dashPayload = this.dashPayload
+  newTx.noStrict = this.noStrict
   if (coins.isZcash(newTx.network)) {
     newTx.versionGroupId = this.versionGroupId
     newTx.expiry = this.expiry
@@ -995,6 +1000,24 @@ Transaction.prototype.setWitness = function (index, witness) {
   typeforce(types.tuple(types.Number, [types.Buffer]), arguments)
 
   this.ins[index].witness = witness
+}
+
+Transaction.prototype.getExtraData = function () {
+  if (coins.isZcash(this.network) && this.version >= 3) {
+    var buffer = this.toBuffer()
+    var joinsplitByteLength = this.joinsplitByteLength()
+    var res = buffer.slice(buffer.length - joinsplitByteLength)
+    return res
+  }
+  if (coins.isDash(this.network) && this.dashPayload) {
+    var extraDataLength = varuint.encode(this.dashPayload.length)
+    return Buffer.concat([extraDataLength, this.dashPayload]);
+  }
+  return null
+}
+
+Transaction.prototype.isZcashTransaction = function () {
+  return coins.isZcash(this.network)
 }
 
 module.exports = Transaction
