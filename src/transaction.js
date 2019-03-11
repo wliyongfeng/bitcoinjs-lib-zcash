@@ -201,8 +201,7 @@ Transaction.fromBuffer = function (buffer, network, __noStrict) {
       }
       tx.versionGroupId = readUInt32()
     }
-  } else if(coins.isDash(tx.network)){
-    tx.version = readInt32()
+  } else if(coins.isDash(tx.network)) {
     tx.dashType = tx.version >> 16
     tx.version = tx.version & 0xffff
     if (tx.version === 3 && (tx.dashType < Transaction.DASH_NORMAL || tx.dashType > Transaction.DASH_QUORUM_COMMITMENT)) {
