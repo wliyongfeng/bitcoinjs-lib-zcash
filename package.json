@@ -1,6 +1,6 @@
 {
   "name": "bitcoinjs-lib-zcash",
-  "version": "3.6.0",
+  "version": "3.6.1",
   "description": "Client-side Bitcoin JavaScript library with simple zcash and capricoin support",
   "main": "./src/index.js",
   "engines": {
