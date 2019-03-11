@@ -1,3 +1,12 @@
+# 3.6.1
+__added__
+- Added `Transaction.getExtraData` method
+- Added/replaced `network` parameter to `Transaction.fromBuffer` and `Transaction.fromHex` methods
+
+__fixed__
+- Dash special transaction support
+- Zcash version 1 extra data
+
 # 3.6.0
 __added__
 - Added timestamp to `Transaction` object (Capricoin)
