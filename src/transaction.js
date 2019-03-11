@@ -38,7 +38,7 @@ function Transaction (network) {
   this.outputDescs = []; // zcash specific
   this.dashType = 0 // dash specific
   this.dashPayload = 0 // dash specific
-  this.noStrict = false;
+  this.invalidTransaction = false;
 }
 
 Transaction.DEFAULT_SEQUENCE = 0xffffffff
@@ -345,10 +345,7 @@ Transaction.fromBuffer = function (buffer, network, __noStrict) {
     tx.dashPayload = readVarSlice()
   }
 
-  if (__noStrict) {
-    tx.noStrict = true;
-    return tx
-  }
+  if (__noStrict) return tx
   if (offset !== buffer.length) throw new Error('Transaction has unexpected data')
 
   return tx
@@ -518,7 +515,7 @@ Transaction.prototype.clone = function () {
   newTx.network = this.network
   newTx.dashType = this.dashType
   newTx.dashPayload = this.dashPayload
-  newTx.noStrict = this.noStrict
+  newTx.invalidTransaction = this.invalidTransaction
   if (coins.isZcash(newTx.network)) {
     newTx.versionGroupId = this.versionGroupId
     newTx.expiry = this.expiry
