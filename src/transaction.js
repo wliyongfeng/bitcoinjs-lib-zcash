@@ -7,6 +7,8 @@ var opcodes = require('bitcoin-ops')
 var typeforce = require('typeforce')
 var types = require('./types')
 var varuint = require('varuint-bitcoin')
+var networks = require('./networks')
+var coins = require('./coins')
 
 function varSliceSize (someScript) {
   var length = someScript.length
@@ -22,18 +24,21 @@ function vectorSize (someVector) {
   }, 0)
 }
 
-function Transaction () {
+function Transaction (network) {
   this.version = 3
   this.locktime = 0
-  this.timestamp = 0
+  this.timestamp = 0 // capricoin specific
+  this.network = network || networks.zcash
   this.ins = []
   this.outs = []
-  this.joinsplits = []
-  this.versionGroupId = '0x03c48270'
-  this.expiry = 0
-  this.zcash = true
-  this.spendDescs = [];
-  this.outputDescs = [];
+  this.joinsplits = [] // zcash specific
+  this.versionGroupId = '0x03c48270' // zcash specific
+  this.expiry = 0 // zcash specific
+  this.spendDescs = []; // zcash specific
+  this.outputDescs = []; // zcash specific
+  this.dashType = 0 // dash specific
+  this.dashPayload = 0 // dash specific
+  this.invalidTransaction = false;
 }
 
 Transaction.DEFAULT_SEQUENCE = 0xffffffff
@@ -54,12 +59,23 @@ var BLANK_OUTPUT = {
   valueBuffer: VALUE_UINT64_MAX
 }
 
+Transaction.ZCASH_OVERWINTER_VERSION = 3
+Transaction.ZCASH_SAPLING_VERSION = 4
+Transaction.ZCASH_JOINSPLITS_SUPPORT_VERSION = 2
 Transaction.ZCASH_NUM_JS_INPUTS = 2
 Transaction.ZCASH_NUM_JS_OUTPUTS = 2
 Transaction.ZCASH_NOTECIPHERTEXT_SIZE = 1 + 8 + 32 + 32 + 512 + 16
 
 Transaction.ZCASH_G1_PREFIX_MASK = 0x02
 Transaction.ZCASH_G2_PREFIX_MASK = 0x0a
+
+Transaction.DASH_NORMAL = 0
+Transaction.DASH_PROVIDER_REGISTER = 1
+Transaction.DASH_PROVIDER_UPDATE_SERVICE = 2
+Transaction.DASH_PROVIDER_UPDATE_REGISTRAR = 3
+Transaction.DASH_PROVIDER_UPDATE_REVOKE = 4
+Transaction.DASH_COINBASE = 5
+Transaction.DASH_QUORUM_COMMITMENT = 6
 
 Transaction.PREVOUTS_HASH_PERSON = new Buffer('ZcashPrevoutHash')
 Transaction.SEQUENCE_HASH_PERSON = new Buffer('ZcashSequencHash')
@@ -83,7 +99,7 @@ var ZC_SAPLING_OUTPLAINTEXT_SIZE = ZC_JUBJUB_POINT_SIZE + ZC_JUBJUB_SCALAR_SIZE;
 var ZC_SAPLING_ENCCIPHERTEXT_SIZE = ZC_SAPLING_ENCPLAINTEXT_SIZE + NOTEENCRYPTION_AUTH_BYTES;
 var ZC_SAPLING_OUTCIPHERTEXT_SIZE = ZC_SAPLING_OUTPLAINTEXT_SIZE + NOTEENCRYPTION_AUTH_BYTES;
 
-Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
+Transaction.fromBuffer = function (buffer, network, __noStrict) {
   var offset = 0
   function readSlice (n) {
     offset += n
@@ -173,26 +189,31 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
   }
 
   var tx = new Transaction()
+  tx.network = network || networks.bitcoin
+  tx.version = readInt32()
 
-  if (zcash) {
-    var header = readUInt32()
-    tx.version = header & 0x7fffffff
-    var overwintered = header >>> 31
+  if (coins.isZcash(tx.network)) {
+    var overwintered = tx.version >>> 31
+    tx.version = tx.version & 0x7fffffff
     if (tx.version >= 3) {
       if (!overwintered) {
         throw new Error('zcash tx v3+ not overwintered')
       }
       tx.versionGroupId = readUInt32()
     }
-  } else {
-    tx.version = readInt32()
+  } else if(coins.isDash(tx.network)) {
+    tx.dashType = tx.version >> 16
+    tx.version = tx.version & 0xffff
+    if (tx.version === 3 && (tx.dashType < Transaction.DASH_NORMAL || tx.dashType > Transaction.DASH_QUORUM_COMMITMENT)) {
+      throw new Error('Unsupported Dash transaction type')
+    }
   }
 
   var marker = buffer.readUInt8(offset)
   var flag = buffer.readUInt8(offset + 1)
 
   var hasWitnesses = false
-  if (!zcash) {
+  if (!coins.isZcash(tx.network)) {
     if (marker === Transaction.ADVANCED_TRANSACTION_MARKER &&
         flag === Transaction.ADVANCED_TRANSACTION_FLAG) {
       offset += 2
@@ -200,7 +221,7 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
     }
   }
 
-  if (hasTimestamp) {
+  if (coins.isCapricoin(tx.network)) {
     tx.timestamp = readUInt32()
   }
 
@@ -234,11 +255,11 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
 
   tx.locktime = readUInt32()
 
-  if (tx.version >= 3 && zcash) {
+  if (tx.isOverwinterCompatible()) {
     tx.expiry = readUInt32()
   }
 
-  if (tx.version >= 4 && zcash) {
+  if (tx.isSaplingCompatible()) {
     tx.valueBalance = readUInt64();
     var sizeSpendDescs = readVarInt();
     for (var i = 0; i < sizeSpendDescs; i++) {
@@ -251,9 +272,9 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
       var output = readOutputDesc();
       tx.outputDescs.push(output);
     }
-  }	
+  }
 
-  if (tx.version >= 2 && zcash) {
+  if (tx.supportsJoinSplits()) {
     var jsLen = readVarInt()
     for (i = 0; i < jsLen; ++i) {
       var vpubOld = readUInt64()
@@ -314,12 +335,15 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
       tx.joinsplitPubkey = readSlice(32)
       tx.joinsplitSig = readSlice(64)
     }
-    if (tx.version >= 4 && ((tx.spendDescs.length + tx.outputDescs.length) > 0)) {
+    if (tx.isSaplingCompatible() && ((tx.spendDescs.length + tx.outputDescs.length) > 0)) {
       tx.bindingSig = readSlice(64);
     }
   }
+  
 
-  tx.zcash = !!zcash
+  if (tx.isDashSpecialTransaction()) {
+    tx.dashPayload = readVarSlice()
+  }
 
   if (__noStrict) return tx
   if (offset !== buffer.length) throw new Error('Transaction has unexpected data')
@@ -327,8 +351,8 @@ Transaction.fromBuffer = function (buffer, zcash, hasTimestamp, __noStrict) {
   return tx
 }
 
-Transaction.fromHex = function (hex, zcash, hasTimestamp) {
-  return Transaction.fromBuffer(new Buffer(hex, 'hex'), zcash, hasTimestamp)
+Transaction.fromHex = function (hex, network) {
+  return Transaction.fromBuffer(new Buffer(hex, 'hex'), network)
 }
 
 Transaction.isCoinbaseHash = function (buffer) {
@@ -396,7 +420,6 @@ Transaction.prototype.byteLength = function () {
 }
 
 Transaction.prototype.joinsplitByteLength = function () {
-  var isSaplingCompatible = this.version >= 4
 
   var joinSplitsLen = this.joinsplits.length
   var byteLength = 0
@@ -406,7 +429,7 @@ Transaction.prototype.joinsplitByteLength = function () {
     // Both pre and post Sapling JoinSplits are encoded with the following data:
     // 8 vpub_old, 8 vpub_new, 32 anchor, joinSplitsLen * 32 nullifiers, joinSplitsLen * 32 commitments, 32 ephemeralKey
     // 32 ephemeralKey, 32 randomSeed, joinsplit.macs.length * 32 vmacs
-    if (isSaplingCompatible) {
+    if (this.isSaplingCompatible()) {
       byteLength += 1698 * joinSplitsLen  // vJoinSplit using JSDescriptionGroth16
     } else {
       byteLength += 1802 * joinSplitsLen  // vJoinSplit using JSDescriptionPHGR13
@@ -433,11 +456,12 @@ Transaction.prototype.outputDescsByteLength = function () {
 }
 
 Transaction.prototype.zcashTransactionByteLength = function() {
-  var isOverwinterCompatible = this.version >= 3
-  var isSaplingCompatible = this.version >= 4
+  if (!coins.isZcash(this.network)) {
+    throw new Error('zcashTransactionByteLength can only be called when using Zcash network')
+  }
   var byteLength = 0
   byteLength += 4  // Header
-  if (isOverwinterCompatible) {
+  if (this.isOverwinterCompatible()) {
     byteLength += 4  // nVersionGroupId
   }
   byteLength += varuint.encodingLength(this.ins.length)  // tx_in_count
@@ -445,16 +469,18 @@ Transaction.prototype.zcashTransactionByteLength = function() {
   byteLength += varuint.encodingLength(this.outs.length)  // tx_out_count
   byteLength += this.outs.reduce(function (sum, output) { return sum + 8 + varSliceSize(output.script) }, 0)  // tx_out
   byteLength += 4  // lock_time
-  if (isOverwinterCompatible) {
+  if (this.isOverwinterCompatible()) {
     byteLength += 4  // nExpiryHeight
   }
-  if (isSaplingCompatible) {
+  if (this.isSaplingCompatible()) {
     byteLength += 8  // valueBalance
     byteLength += this.spendDescsByteLength()
     byteLength += this.outputDescsByteLength()
   }
-  byteLength += this.joinsplitByteLength()
-  if (isSaplingCompatible &&
+  if (this.supportsJoinSplits()) {
+    byteLength += this.joinsplitByteLength()
+  }
+  if (this.isSaplingCompatible() &&
     this.spendDescs.length + this.outputDescs.length > 0) {
     byteLength += 64  // bindingSig
   }
@@ -462,7 +488,7 @@ Transaction.prototype.zcashTransactionByteLength = function() {
 }
 
 Transaction.prototype.__byteLength = function (__allowWitness) {
-  if (this.zcash) {
+  if (coins.isZcash(this.network)) {
     return this.zcashTransactionByteLength();
   }
 
@@ -475,6 +501,7 @@ Transaction.prototype.__byteLength = function (__allowWitness) {
     varuint.encodingLength(this.outs.length) +
     this.ins.reduce(function (sum, input) { return sum + 40 + varSliceSize(input.script) }, 0) +
     this.outs.reduce(function (sum, output) { return sum + 8 + varSliceSize(output.script) }, 0) +
+    (this.isDashSpecialTransaction() ? varSliceSize(this.dashPayload) : 0) +
     (hasWitnesses ? this.ins.reduce(function (sum, input) { return sum + vectorSize(input.witness) }, 0) : 0)
   )
 }
@@ -484,8 +511,12 @@ Transaction.prototype.clone = function () {
   var newTx = new Transaction()
   newTx.version = this.version
   newTx.locktime = this.locktime
-  newTx.zcash = this.zcash
-  if (newTx.zcash) {
+  newTx.timestamp = this.timestamp
+  newTx.network = this.network
+  newTx.dashType = this.dashType
+  newTx.dashPayload = this.dashPayload
+  newTx.invalidTransaction = this.invalidTransaction
+  if (coins.isZcash(newTx.network)) {
     newTx.versionGroupId = this.versionGroupId
     newTx.expiry = this.expiry
   }
@@ -789,6 +820,7 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
   function writeSlice (slice) { offset += slice.copy(buffer, offset) }
   function writeUInt8 (i) { offset = buffer.writeUInt8(i, offset) }
   function writeUInt32 (i) { offset = buffer.writeUInt32LE(i, offset) }
+  function writeInt16 (i) { offset = buffer.writeInt16LE(i, offset) }
   function writeInt32 (i) { offset = buffer.writeInt32LE(i, offset) }
   function writeUInt64 (i) { offset = bufferutils.writeUInt64LE(buffer, i, offset) }
   function writeVarInt (i) {
@@ -827,9 +859,12 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
     writeSlice(i.proof);
   }
 
-  if (this.version >= 3 && this.zcash) {
+  if (this.isOverwinterCompatible()) {
     writeInt32(this.version | (1 << 31))
     writeUInt32(this.versionGroupId)
+  } else if(this.isDashSpecialTransaction()) {
+    writeInt16(this.version)
+    writeInt16(this.dashType)
   } else {
     writeInt32(this.version)
   }
@@ -873,11 +908,11 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
 
   writeUInt32(this.locktime)
 
-  if (this.version >= 3 && this.zcash) {
+  if (this.isOverwinterCompatible()) {
     writeUInt32(this.expiry)
   }
 
-  if (this.version >= 4 && this.zcash) {
+  if (this.isSaplingCompatible()) {
     writeUInt64(this.valueBalance);
     writeVarInt(this.spendDescs.length);
     for (var i = 0; i < this.spendDescs.length; i++) {
@@ -889,7 +924,7 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
     }
   }
 
-  if (this.version >= 2 && this.zcash) {
+  if (this.supportsJoinSplits()) {
     writeVarInt(this.joinsplits.length)
     var version = this.version;
     this.joinsplits.forEach(function (joinsplit) {
@@ -929,9 +964,13 @@ Transaction.prototype.__toBuffer = function (buffer, initialOffset, __allowWitne
       writeSlice(this.joinsplitPubkey)
       writeSlice(this.joinsplitSig)
     }
-    if (this.version >= 4 && ((this.spendDescs.length + this.outputDescs.length) > 0)) {
+    if (this.isSaplingCompatible() && ((this.spendDescs.length + this.outputDescs.length) > 0)) {
       writeSlice(this.bindingSig);
     }
+  }
+
+  if (this.isDashSpecialTransaction()) {
+    writeVarSlice(this.dashPayload)
   }
 
   // avoid slicing unless necessary
@@ -953,6 +992,41 @@ Transaction.prototype.setWitness = function (index, witness) {
   typeforce(types.tuple(types.Number, [types.Buffer]), arguments)
 
   this.ins[index].witness = witness
+}
+
+Transaction.prototype.getExtraData = function () {
+  if (this.supportsJoinSplits()) {
+    var buffer = this.toBuffer()
+    var joinsplitByteLength = this.joinsplitByteLength()
+    var res = buffer.slice(buffer.length - joinsplitByteLength)
+    return res
+  }
+  // if (coins.isDash(this.network) && this.dashPayload) {
+  if (this.isDashSpecialTransaction()) {
+    var extraDataLength = varuint.encode(this.dashPayload.length)
+    return Buffer.concat([extraDataLength, this.dashPayload]);
+  }
+  return null
+}
+
+Transaction.prototype.isZcashTransaction = function () {
+  return coins.isZcash(this.network)
+}
+
+Transaction.prototype.isSaplingCompatible = function () {
+  return coins.isZcash(this.network) && this.version >= Transaction.ZCASH_SAPLING_VERSION
+}
+
+Transaction.prototype.isOverwinterCompatible = function () {
+  return coins.isZcash(this.network) && this.version >= Transaction.ZCASH_OVERWINTER_VERSION
+}
+
+Transaction.prototype.supportsJoinSplits = function () {
+  return coins.isZcash(this.network) && this.version >= Transaction.ZCASH_JOINSPLITS_SUPPORT_VERSION
+}
+
+Transaction.prototype.isDashSpecialTransaction = function () {
+  return coins.isDash(this.network) && this.version === 3 && this.dashType !== Transaction.DASH_NORMAL
 }
 
 module.exports = Transaction
