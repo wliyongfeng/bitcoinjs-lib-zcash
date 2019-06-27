@@ -195,7 +195,8 @@ function isCanonicalSignature (buffer) {
   if (!Buffer.isBuffer(buffer)) return false
   if (!isDefinedHashType(buffer[buffer.length - 1])) return false
 
-  return bip66.check(buffer.slice(0, -1))
+  return true;
+  // return bip66.check(buffer.slice(0, -1))
 }
 
 module.exports = {

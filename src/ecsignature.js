@@ -51,8 +51,15 @@ ECSignature.parseScriptSignature = function (buffer) {
 
   if (hashTypeMod <= 0x00 || hashTypeMod >= 0x04) throw new Error('Invalid hashType ' + hashType)
 
+  let decode;
+  try {
+    decode = ECSignature.fromDER(buffer.slice(0, -1))
+  } catch (e) {
+    decode = ECSignature.fromDER(buffer.slice(0, -2))
+  }
+
   return {
-    signature: ECSignature.fromDER(buffer.slice(0, -1)),
+    signature: decode,
     hashType: hashType
   }
 }
